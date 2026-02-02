@@ -1,0 +1,5 @@
+{
+  "name": "бот для психологов",
+  "description": "A serverless Telegram bot using Telegraf, TypeScript, and React deployed on Netlify.",
+  "requestFramePermissions": []
+}

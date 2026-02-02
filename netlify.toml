@@ -1,0 +1,7 @@
+[build]
+  command = "npm run build"
+  functions = "api"
+  publish = "dist"
+
+[functions]
+  node_bundler = "esbuild"

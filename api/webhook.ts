@@ -1,3 +1,4 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { Telegraf, Markup } from 'telegraf';
 import { getBotToken, getWebhookSecret } from '../lib/config';
 import { containsProfanity, escapeHtml, truncateForTelegram } from '../lib/textUtils';
@@ -291,25 +292,30 @@ bot.on(['photo', 'voice', 'video', 'video_note', 'document', 'sticker', 'audio']
 });
 
 // ---------------------------------------------------------------------------
-// Netlify handler
+// Vercel handler
 // ---------------------------------------------------------------------------
 
-export const handler = async (event: any) => {
-  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
 
   const webhookSecret = getWebhookSecret();
   if (webhookSecret) {
-    const headerSecret =
-      event.headers?.['x-telegram-bot-api-secret-token'] || event.headers?.['X-Telegram-Bot-Api-Secret-Token'];
+    const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
     if (headerSecret !== webhookSecret) {
       console.warn('[webhook] rejected update: bad/missing secret token');
-      return { statusCode: 401, body: 'Unauthorized' };
+      res.status(401).send('Unauthorized');
+      return;
     }
   }
 
   try {
-    const body = JSON.parse(event.body);
-    await bot.handleUpdate(body);
+    // Vercel's Node runtime already parses a JSON body for us, but guard
+    // against it arriving as a raw string just in case.
+    const update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    await bot.handleUpdate(update);
   } catch (error) {
     // Telegram disables a webhook after too many consecutive non-2xx
     // responses. A bug or a transient Supabase hiccup must not risk that —
@@ -317,5 +323,5 @@ export const handler = async (event: any) => {
     // delivering updates no matter what.
     console.error('[webhook] error handling update', error);
   }
-  return { statusCode: 200, body: JSON.stringify({ ok: true }) };
-};
+  res.status(200).json({ ok: true });
+}

@@ -1,19 +1,22 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { Telegraf, Markup } from 'telegraf';
 import { getBotToken } from '../lib/config';
 
 const bot = new Telegraf(getBotToken());
 
-export const handler = async (event: any) => {
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: 'Method Not Allowed' };
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
   }
 
   try {
-    const body = JSON.parse(event.body);
-    const { target_chat_id, message, buttons } = body;
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const { target_chat_id, message, buttons } = body || {};
 
     if (!target_chat_id || !message) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Missing chat ID or message text' }) };
+      res.status(400).json({ error: 'Missing chat ID or message text' });
+      return;
     }
 
     // Prepare keyboard
@@ -31,9 +34,9 @@ export const handler = async (event: any) => {
       ...keyboard,
     });
 
-    return { statusCode: 200, body: JSON.stringify({ success: true }) };
+    res.status(200).json({ success: true });
   } catch (error: any) {
     console.error('Publish error:', error);
-    return { statusCode: 500, body: JSON.stringify({ error: error.description || error.message || 'Failed to send post' }) };
+    res.status(500).json({ error: error.description || error.message || 'Failed to send post' });
   }
-};
+}

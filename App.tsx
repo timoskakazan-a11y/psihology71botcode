@@ -12,11 +12,11 @@ const App: React.FC = () => {
   const handleSetWebhook = async () => {
     setIsSettingHook(true);
     try {
-      const webhookUrl = `${window.location.origin}/.netlify/functions/webhook`;
+      const webhookUrl = `${window.location.origin}/api/webhook`;
 
       // The bot token never touches the browser: setWebhook is called from
       // a serverless function that reads it from environment variables.
-      const res = await fetch('/.netlify/functions/setup', {
+      const res = await fetch('/api/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ webhookUrl }),

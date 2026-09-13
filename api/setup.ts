@@ -2,23 +2,28 @@
 // This replaces the old approach where the token was hardcoded directly in
 // the client-side React bundle (App.tsx) — which shipped the secret to
 // every visitor's browser. Now the browser never sees the token at all.
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getBotToken, getWebhookSecret } from '../lib/config';
 
-export const handler = async (event: any) => {
-  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
 
   try {
-    const body = JSON.parse(event.body || '{}');
-    const webhookUrl = body.webhookUrl;
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const webhookUrl = body?.webhookUrl;
     if (!webhookUrl || typeof webhookUrl !== 'string') {
-      return { statusCode: 400, body: JSON.stringify({ ok: false, description: 'Missing webhookUrl' }) };
+      res.status(400).json({ ok: false, description: 'Missing webhookUrl' });
+      return;
     }
 
     const token = getBotToken();
     const secret = getWebhookSecret();
 
     const apiUrl = `https://api.telegram.org/bot${token}/setWebhook`;
-    const res = await fetch(apiUrl, {
+    const tgRes = await fetch(apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -26,11 +31,11 @@ export const handler = async (event: any) => {
         ...(secret ? { secret_token: secret } : {}),
       }),
     });
-    const data = await res.json();
+    const data = await tgRes.json();
 
-    return { statusCode: 200, body: JSON.stringify(data) };
+    res.status(200).json(data);
   } catch (error: any) {
     console.error('Setup/setWebhook error:', error);
-    return { statusCode: 500, body: JSON.stringify({ ok: false, description: error.message || 'Failed' }) };
+    res.status(500).json({ ok: false, description: error.message || 'Failed' });
   }
-};
+}

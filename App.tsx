@@ -72,7 +72,7 @@ const App: React.FC = () => {
             </div>
 
             <div className="mt-8 text-center text-xs text-slate-400">
-                Токен бота хранится только на сервере (переменные окружения Netlify).
+                Токен бота хранится только на сервере (переменные окружения Vercel).
             </div>
         </div>
     </div>

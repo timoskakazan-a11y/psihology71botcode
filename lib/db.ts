@@ -62,6 +62,33 @@ export async function setSupportChatId(chatId: number, title: string | null): Pr
   if (error) throw error;
 }
 
+// --- welcome photo (sent with /start) ---
+//
+// Telegram lets you resend a file you already uploaded once by its file_id,
+// instead of re-uploading the bytes — much faster and avoids pushing the
+// full image on every single /start. We cache whichever file_id Telegram
+// handed back the first time.
+
+export async function getWelcomePhotoFileId(): Promise<string | null> {
+  try {
+    const { data, error } = await getSupabase()
+      .from('psy_bot_settings')
+      .select('welcome_photo_file_id')
+      .eq('id', 1)
+      .maybeSingle();
+    if (error) throw error;
+    return data?.welcome_photo_file_id ?? null;
+  } catch (err) {
+    console.error('[db] getWelcomePhotoFileId failed, will re-upload the image', err);
+    return null;
+  }
+}
+
+export async function setWelcomePhotoFileId(fileId: string): Promise<void> {
+  const { error } = await getSupabase().from('psy_bot_settings').update({ welcome_photo_file_id: fileId }).eq('id', 1);
+  if (error) console.error('[db] setWelcomePhotoFileId failed (will just re-upload next time)', error);
+}
+
 // --- blocked_users ---
 
 export async function isBlocked(userId: number): Promise<boolean> {

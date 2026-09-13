@@ -12,12 +12,15 @@ import {
   getOpenTicket,
   getSupportChatId,
   getTicket,
+  getWelcomePhotoFileId,
   isBlocked,
   mapSupportMessage,
   saveMessage,
   setSupportChatId,
+  setWelcomePhotoFileId,
   touchTicket,
 } from '../lib/db';
+import { WELCOME_IMAGE_BASE64 } from '../lib/welcomeImage';
 
 const bot = new Telegraf(getBotToken());
 
@@ -55,13 +58,29 @@ async function requireGroupAdmin(ctx: any): Promise<boolean> {
 // Commands
 // ---------------------------------------------------------------------------
 
-bot.start((ctx) => {
-  ctx.reply(
-    '👋 Привет! Я бот анонимной психологической поддержки.\n\n' +
-      '📝 Напиши мне свою проблему или вопрос — я анонимно передам его психологу. ' +
-      'Никто не увидит ни твоё имя, ни профиль.\n\n' +
-      '⚠️ Пожалуйста, выражайся корректно, мат запрещён.'
-  );
+const WELCOME_CAPTION =
+  '👋 Привет! Я бот анонимной психологической поддержки.\n\n' +
+  '📝 Напиши мне свою проблему или вопрос — я анонимно передам его психологу. ' +
+  'Никто не увидит ни твоё имя, ни профиль.\n\n' +
+  '⚠️ Пожалуйста, выражайся корректно, мат запрещён.';
+
+bot.start(async (ctx) => {
+  try {
+    const cachedFileId = await getWelcomePhotoFileId();
+    const photo = cachedFileId ?? { source: Buffer.from(WELCOME_IMAGE_BASE64, 'base64') };
+    const sent = await ctx.replyWithPhoto(photo, { caption: WELCOME_CAPTION });
+
+    if (!cachedFileId) {
+      // Telegram gives back several resized copies — the last one is the
+      // largest, and any of them can be reused as a file_id going forward.
+      const fileId = sent.photo?.[sent.photo.length - 1]?.file_id;
+      if (fileId) await setWelcomePhotoFileId(fileId);
+    }
+  } catch (e) {
+    // Never let a picture problem stop someone from reaching support.
+    console.error('[bot] failed to send welcome photo, falling back to text', e);
+    await ctx.reply(WELCOME_CAPTION);
+  }
 });
 
 // Called by psychologists inside their group chat to (re)bind it as the

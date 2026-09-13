@@ -1,8 +1,5 @@
 import React, { useState } from 'react';
 
-// --- CONFIG ---
-const BOT_TOKEN = "8477534798:AAHb2ngDjS8QpjCkaFpGhFuOeSgb3ozjXy4";
-
 // --- ICONS ---
 const Icons = {
   Heart: () => <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" /></svg>,
@@ -16,15 +13,20 @@ const App: React.FC = () => {
     setIsSettingHook(true);
     try {
       const webhookUrl = `${window.location.origin}/.netlify/functions/webhook`;
-      const apiUrl = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${webhookUrl}`;
-      
-      const res = await fetch(apiUrl);
+
+      // The bot token never touches the browser: setWebhook is called from
+      // a serverless function that reads it from environment variables.
+      const res = await fetch('/.netlify/functions/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhookUrl }),
+      });
       const data = await res.json();
-      
+
       if (data.ok) {
         alert(`✅ Бот подключен успешно!\nURL: ${webhookUrl}\n\nТеперь:\n1. Добавьте бота в чат психологов.\n2. Напишите там /send.`);
       } else {
-        alert(`❌ Ошибка Telegram: ${data.description}`);
+        alert(`❌ Ошибка: ${data.description || 'неизвестная ошибка'}`);
       }
     } catch (e: any) {
       alert(`Ошибка сети: ${e.message}`);
@@ -51,12 +53,12 @@ const App: React.FC = () => {
                     <ol className="list-decimal list-inside space-y-1">
                         <li>Нажмите кнопку ниже, чтобы соединить бота с сервером.</li>
                         <li>Добавьте бота в <b>Группу Психологов</b>.</li>
-                        <li>Напишите в группе команду <code>/send</code>.</li>
-                        <li>Бот начнет пересылать туда сообщения пользователей.</li>
+                        <li>Напишите в группе команду <code>/send</code> (от имени администратора группы).</li>
+                        <li>Бот начнёт пересылать туда сообщения пользователей — привязка сохраняется в базе и не слетает.</li>
                     </ol>
                 </div>
 
-                <button 
+                <button
                     onClick={handleSetWebhook}
                     disabled={isSettingHook}
                     className="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-rose-500/30 flex items-center justify-center gap-2"
@@ -68,9 +70,9 @@ const App: React.FC = () => {
                     )}
                 </button>
             </div>
-            
+
             <div className="mt-8 text-center text-xs text-slate-400">
-                Token: ...{BOT_TOKEN.slice(-5)}
+                Токен бота хранится только на сервере (переменные окружения Netlify).
             </div>
         </div>
     </div>

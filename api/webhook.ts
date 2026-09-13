@@ -1,158 +1,321 @@
 import { Telegraf, Markup } from 'telegraf';
+import { getBotToken, getWebhookSecret } from '../lib/config';
+import { containsProfanity, escapeHtml, truncateForTelegram } from '../lib/textUtils';
+import {
+  blockUser,
+  closeOpenTicketsForUser,
+  closeTicket,
+  countOpenTickets,
+  createTicket,
+  findTicketIdByReply,
+  getOpenTicket,
+  getSupportChatId,
+  getTicket,
+  isBlocked,
+  mapSupportMessage,
+  saveMessage,
+  setSupportChatId,
+  touchTicket,
+} from '../lib/db';
 
-// --- CONFIGURATION ---
-const BOT_TOKEN = "8477534798:AAHb2ngDjS8QpjCkaFpGhFuOeSgb3ozjXy4";
+const bot = new Telegraf(getBotToken());
 
-const bot = new Telegraf(BOT_TOKEN);
+// Never let one bad update crash the whole function silently.
+bot.catch((err, ctx) => {
+  console.error(`[bot] unhandled error for update ${ctx.update.update_id}`, err);
+});
 
-// --- IN-MEMORY STATE (Serverless Limitation: Resets on cold start) ---
-// В реальном продакшене это нужно хранить в базе данных.
-let SUPPORT_CHAT_ID: string | number | null = null;
-const BLOCKED_USERS = new Set<number>();
-
-// --- PROFANITY FILTER ---
-const BAD_WORDS = ['бля', 'сука', 'хуй', 'пизд', 'ебат', 'хер', 'мудак', 'гандон', 'fuck', 'shit'];
-
-function containsProfanity(text: string): boolean {
-    const lowerText = text.toLowerCase();
-    return BAD_WORDS.some(word => lowerText.includes(word));
+function isSameChat(a: number | string, b: number | string): boolean {
+  return a.toString() === b.toString();
 }
 
-// --- COMMANDS ---
+async function requireGroupAdmin(ctx: any): Promise<boolean> {
+  if (ctx.chat.type !== 'group' && ctx.chat.type !== 'supergroup') {
+    await ctx.reply('⚠️ Эту команду нужно выполнять в групповом чате психологов, а не в личке.');
+    return false;
+  }
+  try {
+    const member = await ctx.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+    if (member.status !== 'creator' && member.status !== 'administrator') {
+      await ctx.reply('⛔ Только администраторы этого чата могут это делать.');
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error('[bot] requireGroupAdmin check failed', e);
+    // If Telegram won't tell us the member status, fail closed for a
+    // rebind (/send) but this helper is also reused for /status where a
+    // failed check shouldn't block a harmless read — callers decide.
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
 
 bot.start((ctx) => {
-    ctx.reply(`👋 Привет! Я бот психологической поддержки.\n\n📝 Напиши мне свою проблему или вопрос, и я передам его специалисту.\n\n⚠️ Пожалуйста, выражайся корректно, мат запрещен.`);
+  ctx.reply(
+    '👋 Привет! Я бот анонимной психологической поддержки.\n\n' +
+      '📝 Напиши мне свою проблему или вопрос — я анонимно передам его психологу. ' +
+      'Никто не увидит ни твоё имя, ни профиль.\n\n' +
+      '⚠️ Пожалуйста, выражайся корректно, мат запрещён.'
+  );
 });
 
-// Команда для психологов: установить этот чат как приемник заявок
-bot.command('send', (ctx) => {
-    SUPPORT_CHAT_ID = ctx.chat.id;
-    ctx.reply(`✅ Чат установлен как приемник заявок.\nID: ${SUPPORT_CHAT_ID}\n\nТеперь сообщения от пользователей будут приходить сюда.`);
-});
-
-// --- ACTIONS (BUTTONS) ---
-
-// 1. Блокировка пользователя
-bot.action(/^block_(\d+)$/, async (ctx) => {
-    if (!SUPPORT_CHAT_ID || ctx.chat?.id.toString() !== SUPPORT_CHAT_ID.toString()) return;
-    
-    const userId = parseInt(ctx.match[1]);
-    BLOCKED_USERS.add(userId);
-    
-    await ctx.answerCbQuery("Пользователь заблокирован 🚫");
-    await ctx.editMessageText(`${ctx.callbackQuery.message?.text}\n\n❌ [Пользователь заблокирован]`, {
-        parse_mode: 'Markdown'
-    });
-});
-
-// 2. Начало ответа (ForceReply)
-bot.action(/^reply_(\d+)$/, async (ctx) => {
-    if (!SUPPORT_CHAT_ID || ctx.chat?.id.toString() !== SUPPORT_CHAT_ID.toString()) return;
-    
-    const userId = ctx.match[1];
-    // Получаем текст исходного обращения из сообщения бота (удаляем "📩 Новое обращение от...")
-    const originalMsg = ctx.callbackQuery.message?.text || "";
-    // Извлекаем "чистый" текст обращения (все после двоеточия и переноса строки)
-    // Формат: "📩 Новое обращение от UserID:\nТекст"
-    const content = originalMsg.split('\n').slice(1).join(' ').trim() || "обращение";
-
-    // Отправляем сообщение с ForceReply, чтобы админ ответил на него
-    // Мы кодируем ID юзера и превью текста в само сообщение, чтобы распарсить при ответе
+// Called by psychologists inside their group chat to (re)bind it as the
+// destination for tickets. Persisted in Supabase, so it survives cold
+// starts, redeploys, and restarts — it does not "fly off" anymore.
+bot.command('send', async (ctx) => {
+  if (!(await requireGroupAdmin(ctx))) return;
+  try {
+    const title = 'title' in ctx.chat ? ctx.chat.title ?? null : null;
+    await setSupportChatId(ctx.chat.id, title);
     await ctx.reply(
-        `✍️ Введите ответ для пользователя ${userId}.\n\nЦитата обращения: "${content.substring(0, 50)}..."`, 
-        {
-            reply_markup: { force_reply: true, input_field_placeholder: "Напишите ответ тут..." }
-        }
+      `✅ Этот чат назначен приёмником анонимных обращений.\nID чата: ${ctx.chat.id}\n\n` +
+        'Теперь сюда будут приходить все новые сообщения от пользователей.'
     );
-    await ctx.answerCbQuery();
+  } catch (e) {
+    console.error('[bot] /send failed to persist binding', e);
+    await ctx.reply(
+      '❌ Не удалось сохранить привязку чата (проблема с базой данных). Попробуйте выполнить /send ещё раз через минуту.'
+    );
+  }
 });
 
-// --- MESSAGE HANDLER ---
+bot.command('status', async (ctx) => {
+  const chatId = await getSupportChatId();
+  const boundHere = chatId != null && isSameChat(chatId, ctx.chat.id);
+  const openCount = await countOpenTickets();
+  await ctx.reply(
+    'ℹ️ <b>Статус бота</b>\n' +
+      `Привязанный чат психологов: ${chatId != null ? `<code>${chatId}</code>` : 'не назначен ⚠️'}\n` +
+      (chatId != null ? (boundHere ? '✅ Это текущий чат.' : '⚠️ Обращения приходят в другой чат.') : '') +
+      `\nОткрытых обращений: ${openCount}`,
+    { parse_mode: 'HTML' }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Inline button actions
+// ---------------------------------------------------------------------------
+
+bot.action(/^reply_(\d+)$/, async (ctx) => {
+  const supportChatId = await getSupportChatId();
+  if (!supportChatId || !ctx.chat || !isSameChat(supportChatId, ctx.chat.id)) {
+    await ctx.answerCbQuery();
+    return;
+  }
+  const ticketId = Number(ctx.match[1]);
+  const ticket = await getTicket(ticketId);
+  if (!ticket) {
+    await ctx.answerCbQuery('Обращение не найдено', { show_alert: true });
+    return;
+  }
+
+  const sent = await ctx.reply(`✍️ Ответ на обращение #${ticketId}. Отправьте текст ответом на ЭТО сообщение.`, {
+    reply_markup: { force_reply: true, input_field_placeholder: 'Ваш ответ...' },
+  });
+  await mapSupportMessage(sent.message_id, ticketId);
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^close_(\d+)$/, async (ctx) => {
+  const supportChatId = await getSupportChatId();
+  if (!supportChatId || !ctx.chat || !isSameChat(supportChatId, ctx.chat.id)) {
+    await ctx.answerCbQuery();
+    return;
+  }
+  const ticketId = Number(ctx.match[1]);
+  await closeTicket(ticketId);
+  await ctx.answerCbQuery('Обращение закрыто ✅');
+  try {
+    const original = (ctx.callbackQuery.message as any)?.text ?? '';
+    await ctx.editMessageText(`${original}\n\n🔒 Обращение закрыто`, { parse_mode: 'HTML' });
+  } catch (e) {
+    // Editing can fail (e.g. message too old) — not critical, the ticket is
+    // already closed in the database.
+  }
+});
+
+bot.action(/^block_(\d+)$/, async (ctx) => {
+  const supportChatId = await getSupportChatId();
+  if (!supportChatId || !ctx.chat || !isSameChat(supportChatId, ctx.chat.id)) {
+    await ctx.answerCbQuery();
+    return;
+  }
+  const userId = Number(ctx.match[1]);
+  await blockUser(userId, ctx.from.id);
+  await closeOpenTicketsForUser(userId);
+  await ctx.answerCbQuery('Пользователь заблокирован 🚫');
+  try {
+    const original = (ctx.callbackQuery.message as any)?.text ?? '';
+    await ctx.editMessageText(`${original}\n\n🚫 Пользователь заблокирован`, { parse_mode: 'HTML' });
+  } catch (e) {
+    // Non-critical.
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Plain text messages
+// ---------------------------------------------------------------------------
 
 bot.on('text', async (ctx) => {
-    const userId = ctx.from.id;
-    const text = ctx.message.text;
+  const supportChatId = await getSupportChatId();
+  const inSupportChat = supportChatId != null && isSameChat(supportChatId, ctx.chat.id);
 
-    // A. ОБРАБОТКА ОТВЕТА ПСИХОЛОГА (Админ чат)
-    if (SUPPORT_CHAT_ID && ctx.chat.id.toString() === SUPPORT_CHAT_ID.toString()) {
-        const replyTo = ctx.message.reply_to_message;
-        
-        // Проверяем, что это ответ на запрос бота "Введите ответ..."
-        if (replyTo && 'text' in replyTo && replyTo.from?.id === ctx.botInfo.id && replyTo.text?.startsWith('✍️ Введите ответ')) {
-            
-            // Парсим ID пользователя из первой строки: "✍️ Введите ответ для пользователя 12345."
-            const idMatch = replyTo.text.match(/для пользователя (\d+)/);
-            // Парсим цитату: Цитата обращения: "Текст..."
-            const quoteMatch = replyTo.text.match(/Цитата обращения: "(.*)"/);
-
-            if (idMatch) {
-                const targetUserId = idMatch[1];
-                const quote = quoteMatch ? quoteMatch[1] : "ваше сообщение";
-
-                try {
-                    // Отправляем красивый ответ пользователю
-                    await ctx.telegram.sendMessage(targetUserId, 
-                        `📨 <b>Ответ на твое обращение</b> <i>"${quote}"</i>\n\n` +
-                        `Ниже ответ:\n` +
-                        `✨ ${text}`, 
-                        { parse_mode: 'HTML' }
-                    );
-                    await ctx.reply("✅ Ответ отправлен.");
-                } catch (e) {
-                    await ctx.reply("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.");
-                }
-            }
-        }
-        return; // Больше ничего не делаем в админ чате
+  // --- A. A psychologist writing inside the bound group chat ---
+  if (inSupportChat) {
+    const replyTo = ctx.message.reply_to_message;
+    if (!replyTo) {
+      // A message typed without hitting Reply on anything — we don't know
+      // which ticket it's for, so we don't guess. This is intentional: it's
+      // exactly the ambiguity that used to make psychologists mix up
+      // conversations.
+      return;
     }
 
-    // B. ОБРАБОТКА СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЯ (Личка)
+    // Works whether the psychologist replied to the original ticket card,
+    // the "✍️ Ответ на обращение" prompt, or an earlier reply in the same
+    // thread — every one of those messages is mapped to the ticket.
+    const ticketId = await findTicketIdByReply(replyTo.message_id);
+    if (!ticketId) return;
 
-    // 1. Проверка блокировки
-    if (BLOCKED_USERS.has(userId)) {
-        return; // Игнорируем заблокированных
+    const ticket = await getTicket(ticketId);
+    if (!ticket) {
+      await ctx.reply('⚠️ Это обращение больше не найдено в базе.');
+      return;
     }
 
-    // 2. Фильтр мата
-    if (containsProfanity(text)) {
-        await ctx.reply("⚠️ Ваше сообщение содержит недопустимую лексику. Пожалуйста, переформулируйте.");
-        return;
-    }
-
-    // 3. Проверка наличия чата поддержки
-    if (!SUPPORT_CHAT_ID) {
-        await ctx.reply("😔 Извините, сейчас нет свободных специалистов. Попробуйте позже.\n(Администратор еще не активировал чат командой /send)");
-        return;
-    }
-
-    // 4. Пересылка в чат поддержки
+    const answerText = ctx.message.text;
     try {
-        await ctx.telegram.sendMessage(SUPPORT_CHAT_ID, 
-            `📩 <b>Новое обращение от</b> <a href="tg://user?id=${userId}">${ctx.from.first_name}</a> (ID: ${userId}):\n\n${text}`, 
-            {
-                parse_mode: 'HTML',
-                reply_markup: Markup.inlineKeyboard([
-                    Markup.button.callback("↩️ Ответить", `reply_${userId}`),
-                    Markup.button.callback("🚫 Заблокировать", `block_${userId}`)
-                ]).reply_markup
-            }
-        );
-        await ctx.reply("✅ Ваше сообщение отправлено психологу. Ожидайте ответа.");
+      await bot.telegram.sendMessage(
+        ticket.user_id,
+        `📨 <b>Ответ психолога</b>\n\n${escapeHtml(truncateForTelegram(answerText, 40))}`,
+        { parse_mode: 'HTML' }
+      );
     } catch (e) {
-        console.error("Forwarding error", e);
-        await ctx.reply("Ошибка отправки. Попробуйте позже.");
+      console.error('[bot] delivering reply to user failed', e);
+      await ctx.reply('❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.');
+      return;
     }
+
+    const psychologistName = ctx.from.first_name || 'Психолог';
+    await saveMessage({
+      ticketId,
+      sender: 'psychologist',
+      senderTelegramId: ctx.from.id,
+      psychologistName,
+      text: answerText,
+      supportMessageId: ctx.message.message_id,
+    });
+    await touchTicket(ticketId, { status: 'answered' });
+
+    // Map the psychologist's own message too, so if someone replies to
+    // *this* message later, it still resolves to the same ticket.
+    await mapSupportMessage(ctx.message.message_id, ticketId);
+
+    const confirmation = await ctx.reply(`✅ Ответ по обращению #${ticketId} отправлен пользователю.`, {
+      reply_parameters: { message_id: ctx.message.message_id },
+    });
+    await mapSupportMessage(confirmation.message_id, ticketId);
+    return;
+  }
+
+  // --- B. A student writing privately to the bot ---
+  const userId = ctx.from.id;
+  const text = ctx.message.text;
+
+  if (await isBlocked(userId)) {
+    return; // Silently ignore blocked users.
+  }
+
+  if (containsProfanity(text)) {
+    await ctx.reply('⚠️ Ваше сообщение содержит недопустимую лексику. Пожалуйста, переформулируйте.');
+    return;
+  }
+
+  if (!supportChatId) {
+    await ctx.reply('😔 Извините, сейчас нет свободных специалистов. Попробуйте написать чуть позже.');
+    return;
+  }
+
+  let ticket = await getOpenTicket(userId);
+  if (!ticket) {
+    try {
+      ticket = await createTicket(userId);
+    } catch (e) {
+      console.error('[bot] createTicket failed', e);
+      await ctx.reply('❌ Не получилось отправить сообщение, попробуйте ещё раз через минуту.');
+      return;
+    }
+  }
+
+  try {
+    const sent = await bot.telegram.sendMessage(
+      supportChatId,
+      `📩 <b>Анонимное обращение #${ticket.id}</b>\n\n${escapeHtml(truncateForTelegram(text, 60))}`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('↩️ Ответить', `reply_${ticket.id}`)],
+          [
+            Markup.button.callback('🔒 Закрыть', `close_${ticket.id}`),
+            Markup.button.callback('🚫 Заблокировать', `block_${userId}`),
+          ],
+        ]).reply_markup,
+      }
+    );
+    await mapSupportMessage(sent.message_id, ticket.id);
+    await touchTicket(ticket.id, { card_message_id: sent.message_id });
+    await saveMessage({
+      ticketId: ticket.id,
+      sender: 'user',
+      senderTelegramId: userId,
+      text,
+      supportMessageId: sent.message_id,
+    });
+    await ctx.reply('✅ Ваше сообщение анонимно отправлено психологу. Ожидайте ответа.');
+  } catch (e) {
+    console.error('[bot] forwarding to support chat failed', e);
+    await ctx.reply('Ошибка отправки. Попробуйте позже.');
+  }
 });
 
-// --- NETLIFY HANDLER ---
+// Anything that isn't text, from a student in a private chat — we only
+// support text for now, and staying silent would look like the bot is
+// broken.
+bot.on(['photo', 'voice', 'video', 'video_note', 'document', 'sticker', 'audio'], async (ctx) => {
+  if (ctx.chat.type !== 'private') return; // only guide students in their 1:1 chat with the bot
+  await ctx.reply('🙏 Пока бот принимает только текстовые сообщения. Опишите ситуацию словами, пожалуйста.');
+});
+
+// ---------------------------------------------------------------------------
+// Netlify handler
+// ---------------------------------------------------------------------------
+
 export const handler = async (event: any) => {
-    if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
-    try {
-        const body = JSON.parse(event.body);
-        await bot.handleUpdate(body);
-        return { statusCode: 200, body: JSON.stringify({ message: 'OK' }) };
-    } catch (error) {
-        console.error(error);
-        return { statusCode: 500, body: JSON.stringify({ error: 'Failed' }) };
+  if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
+
+  const webhookSecret = getWebhookSecret();
+  if (webhookSecret) {
+    const headerSecret =
+      event.headers?.['x-telegram-bot-api-secret-token'] || event.headers?.['X-Telegram-Bot-Api-Secret-Token'];
+    if (headerSecret !== webhookSecret) {
+      console.warn('[webhook] rejected update: bad/missing secret token');
+      return { statusCode: 401, body: 'Unauthorized' };
     }
+  }
+
+  try {
+    const body = JSON.parse(event.body);
+    await bot.handleUpdate(body);
+  } catch (error) {
+    // Telegram disables a webhook after too many consecutive non-2xx
+    // responses. A bug or a transient Supabase hiccup must not risk that —
+    // we log for debugging and still answer 200, so Telegram keeps
+    // delivering updates no matter what.
+    console.error('[webhook] error handling update', error);
+  }
+  return { statusCode: 200, body: JSON.stringify({ ok: true }) };
 };

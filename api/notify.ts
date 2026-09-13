@@ -1,7 +1,7 @@
 import { Telegraf } from 'telegraf';
+import { getBotToken } from '../lib/config';
 
-const BOT_TOKEN = "8477534798:AAHb2ngDjS8QpjCkaFpGhFuOeSgb3ozjXy4";
-const bot = new Telegraf(BOT_TOKEN);
+const bot = new Telegraf(getBotToken());
 
 export const handler = async (event: any) => {
   if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
@@ -17,8 +17,8 @@ export const handler = async (event: any) => {
     await bot.telegram.sendMessage(telegram_id, message, { parse_mode: 'HTML' });
 
     return { statusCode: 200, body: JSON.stringify({ success: true }) };
-  } catch (error) {
+  } catch (error: any) {
     console.error('Notify error:', error);
-    return { statusCode: 500, body: JSON.stringify({ error: 'Failed' }) };
+    return { statusCode: 500, body: JSON.stringify({ error: error.message || 'Failed' }) };
   }
 };

@@ -1,7 +1,7 @@
 import { Telegraf, Markup } from 'telegraf';
+import { getBotToken } from '../lib/config';
 
-const BOT_TOKEN = "8477534798:AAHb2ngDjS8QpjCkaFpGhFuOeSgb3ozjXy4";
-const bot = new Telegraf(BOT_TOKEN);
+const bot = new Telegraf(getBotToken());
 
 export const handler = async (event: any) => {
   if (event.httpMethod !== 'POST') {
@@ -28,7 +28,7 @@ export const handler = async (event: any) => {
 
     await bot.telegram.sendMessage(target_chat_id, message, {
       parse_mode: 'HTML',
-      ...keyboard
+      ...keyboard,
     });
 
     return { statusCode: 200, body: JSON.stringify({ success: true }) };

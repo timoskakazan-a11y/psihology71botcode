@@ -20,7 +20,7 @@ import {
   setWelcomePhotoFileId,
   touchTicket,
 } from '../lib/db';
-import { WELCOME_IMAGE_BASE64 } from '../lib/welcomeImage';
+import { WELCOME_IMAGE_URL } from '../lib/welcomeImage';
 
 const bot = new Telegraf(getBotToken());
 
@@ -67,8 +67,7 @@ const WELCOME_CAPTION =
 bot.start(async (ctx) => {
   try {
     const cachedFileId = await getWelcomePhotoFileId();
-    const photo = cachedFileId ?? { source: Buffer.from(WELCOME_IMAGE_BASE64, 'base64') };
-    const sent = await ctx.replyWithPhoto(photo, { caption: WELCOME_CAPTION });
+    const sent = await ctx.replyWithPhoto(cachedFileId ?? WELCOME_IMAGE_URL, { caption: WELCOME_CAPTION });
 
     if (!cachedFileId) {
       // Telegram gives back several resized copies — the last one is the

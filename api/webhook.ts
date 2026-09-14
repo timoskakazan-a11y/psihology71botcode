@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { Telegraf, Markup } from 'telegraf';
 import { getBotToken, getWebhookSecret } from '../lib/config';
-import { containsProfanity, escapeHtml, truncateForTelegram } from '../lib/textUtils';
+import { containsProfanity, truncateWithEntities, withBoldHeader } from '../lib/textUtils';
 import {
   blockUser,
   closeOpenTicketsForUser,
@@ -207,12 +207,12 @@ bot.on('text', async (ctx) => {
     }
 
     const answerText = ctx.message.text;
+    // Preserve whatever formatting the psychologist used (bold, italic,
+    // spoilers, links, quotes...) instead of flattening it to plain text.
+    const answerBody = truncateWithEntities({ text: answerText, entities: ctx.message.entities }, 40);
+    const answerMessage = withBoldHeader('📨 Ответ психолога', answerBody);
     try {
-      await bot.telegram.sendMessage(
-        ticket.user_id,
-        `📨 <b>Ответ психолога</b>\n\n${escapeHtml(truncateForTelegram(answerText, 40))}`,
-        { parse_mode: 'HTML' }
-      );
+      await bot.telegram.sendMessage(ticket.user_id, answerMessage.text, { entities: answerMessage.entities });
     } catch (e) {
       console.error('[bot] delivering reply to user failed', e);
       await ctx.reply('❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.');
@@ -270,21 +270,22 @@ bot.on('text', async (ctx) => {
     }
   }
 
+  // Preserve whatever formatting the student used, same as with a
+  // psychologist's reply — see withBoldHeader.
+  const ticketBody = truncateWithEntities({ text, entities: ctx.message.entities }, 60);
+  const ticketMessage = withBoldHeader(`📩 Анонимное обращение #${ticket.id}`, ticketBody);
+
   try {
-    const sent = await bot.telegram.sendMessage(
-      supportChatId,
-      `📩 <b>Анонимное обращение #${ticket.id}</b>\n\n${escapeHtml(truncateForTelegram(text, 60))}`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback('↩️ Ответить', `reply_${ticket.id}`)],
-          [
-            Markup.button.callback('🔒 Закрыть', `close_${ticket.id}`),
-            Markup.button.callback('🚫 Заблокировать', `block_${userId}`),
-          ],
-        ]).reply_markup,
-      }
-    );
+    const sent = await bot.telegram.sendMessage(supportChatId, ticketMessage.text, {
+      entities: ticketMessage.entities,
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback('↩️ Ответить', `reply_${ticket.id}`)],
+        [
+          Markup.button.callback('🔒 Закрыть', `close_${ticket.id}`),
+          Markup.button.callback('🚫 Заблокировать', `block_${userId}`),
+        ],
+      ]).reply_markup,
+    });
     await mapSupportMessage(sent.message_id, ticket.id);
     await touchTicket(ticket.id, { card_message_id: sent.message_id });
     await saveMessage({
